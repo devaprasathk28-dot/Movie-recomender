@@ -5,24 +5,17 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Optional
 
-import pandas as pd
 import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from requests.adapters import HTTPAdapter
-from scipy.sparse import csr_matrix
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import linear_kernel
 from urllib3.util.retry import Retry
 
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
-DATA_DIR = PROJECT_ROOT / "data"
-FRONTEND_DIST_DIR = PROJECT_ROOT / "frontend-vite" / "dist"
-FRONTEND_ASSETS_DIR = FRONTEND_DIST_DIR / "assets"
 CACHE_FILE = BASE_DIR / "cache.json"
 
 OMDB_API_URL = "http://www.omdbapi.com/"
@@ -67,7 +60,7 @@ def extract_year(title: str) -> int:
 
 
 def format_imdb_id(imdb_value: Any) -> Optional[str]:
-    if pd.isna(imdb_value):
+    if imdb_value is None:
         return None
 
     raw = str(imdb_value).strip()
@@ -193,9 +186,9 @@ def fetch_movie_details(imdb_id: Optional[str]) -> Dict[str, Any]:
     if cached:
         if "youtube_trailer_id" not in cached or cached.get("youtube_trailer_id") is None:
             try:
-                match = movies[movies["imdbId"] == imdb_id]
-                if not match.empty:
-                    title = match.iloc[0]["title"]
+                movie_item = movies_by_imdb.get(imdb_id)
+                if movie_item:
+                    title = movie_item["title"]
                     cached["youtube_trailer_id"] = fetch_youtube_trailer(title)
                     save_cache()
             except Exception:
@@ -240,9 +233,9 @@ def fetch_movie_details(imdb_id: Optional[str]) -> Dict[str, Any]:
             pass
 
     try:
-        match = movies[movies["imdbId"] == imdb_id]
-        if not match.empty:
-            title = match.iloc[0]["title"]
+        movie_item = movies_by_imdb.get(imdb_id)
+        if movie_item:
+            title = movie_item["title"]
             details["youtube_trailer_id"] = fetch_youtube_trailer(title)
     except Exception:
         pass
@@ -252,68 +245,60 @@ def fetch_movie_details(imdb_id: Optional[str]) -> Dict[str, Any]:
     return details
 
 
-def load_movies() -> pd.DataFrame:
-    movies_path = DATA_DIR / "movies.csv"
-    links_path = DATA_DIR / "links.csv"
-
-    movies_df = pd.read_csv(movies_path)
-    links_df = pd.read_csv(links_path)
-
-    links_df["imdbId"] = links_df["imdbId"].apply(format_imdb_id)
-
-    merged = movies_df.merge(links_df[["movieId", "imdbId"]], on="movieId", how="left")
-    merged = merged.dropna(subset=["imdbId"]).copy()
-
-    merged["title"] = merged["title"].fillna("").str.strip()
-    merged["genres"] = merged["genres"].fillna("").replace("(no genres listed)", "", regex=False)
-    merged["genres_text"] = merged["genres"].str.replace("|", " ", regex=False)
-    merged["year"] = merged["title"].apply(extract_year)
-    merged["normalized_title"] = merged["title"].apply(normalize_title)
-
-    merged = merged[merged["normalized_title"] != ""].copy()
-    merged = merged.sort_values(["normalized_title", "year", "movieId"], ascending=[True, False, True])
-    merged = merged.drop_duplicates(subset=["movieId"]).reset_index(drop=True)
-
-    merged["tags"] = (
-        merged["normalized_title"]
-        + " "
-        + merged["genres_text"]
-        + " "
-        + merged["genres_text"]
-        + " "
-        + merged["year"].astype(str)
-    ).str.strip()
-
-    return merged
+# Load precomputed movies metadata
+def load_movies_metadata() -> list:
+    movies_json_path = BASE_DIR / "movies.json"
+    if not movies_json_path.exists():
+        return []
+    with open(movies_json_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-movies = load_movies()
-vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), min_df=1)
-from scipy.sparse import csr_matrix as _csr
-tfidf_matrix: csr_matrix = _csr(vectorizer.fit_transform(movies["tags"]))
+movies_list = load_movies_metadata()
+movies_by_id = {m["movieId"]: m for m in movies_list}
+movies_by_imdb = {m["imdbId"]: m for m in movies_list if m["imdbId"]}
 
 
-def resolve_movie_index(query: str) -> Optional[int]:
+# Load precomputed recommendations
+def load_recommendations() -> dict:
+    recs_json_path = BASE_DIR / "recommendations.json"
+    if not recs_json_path.exists():
+        return {}
+    with open(recs_json_path, "r", encoding="utf-8") as f:
+        raw_recs = json.load(f)
+        return {int(k): v for k, v in raw_recs.items()}
+
+
+recommendations_map = load_recommendations()
+
+
+def resolve_movie(query: str) -> Optional[dict]:
     normalized_query = normalize_title(query)
     if not normalized_query:
         return None
 
-    exact = movies[movies["normalized_title"] == normalized_query]
-    if not exact.empty:
-        return int(exact.sort_values(["year", "movieId"], ascending=[False, True]).index[0])
+    # Exact matches
+    exact = [m for m in movies_list if m["normalized_title"] == normalized_query]
+    if exact:
+        exact.sort(key=lambda x: (-x["year"], x["movieId"]))
+        return exact[0]
 
-    starts_with = movies[movies["normalized_title"].str.startswith(normalized_query)]
-    if not starts_with.empty:
-        return int(starts_with.sort_values(["year", "movieId"], ascending=[False, True]).index[0])
+    # Starts with matches
+    starts_with = [m for m in movies_list if m["normalized_title"].startswith(normalized_query)]
+    if starts_with:
+        starts_with.sort(key=lambda x: (-x["year"], x["movieId"]))
+        return starts_with[0]
 
-    contains = movies[movies["normalized_title"].str.contains(re.escape(normalized_query), regex=True)]
-    if not contains.empty:
-        return int(contains.sort_values(["year", "movieId"], ascending=[False, True]).index[0])
+    # Contains matches
+    contains = [m for m in movies_list if normalized_query in m["normalized_title"]]
+    if contains:
+        contains.sort(key=lambda x: (-x["year"], x["movieId"]))
+        return contains[0]
 
     return None
 
 
-def serialize_movie(row: pd.Series) -> Dict[str, Any]:
+def serialize_movie(row: dict) -> Dict[str, Any]:
     details = fetch_movie_details(row["imdbId"])
     rating = details["rating"]
 
@@ -323,7 +308,7 @@ def serialize_movie(row: pd.Series) -> Dict[str, Any]:
         "poster": details["poster"],
         "backdrop": details["poster"],
         "rating": rating if rating is not None else -1,
-        "year": int(row["year"]) if pd.notna(row["year"]) else 0,
+        "year": int(row["year"]) if row.get("year") is not None else 0,
         "overview": details["overview"],
         "director": details.get("director") or "",
         "actors": details.get("actors") or "",
@@ -336,41 +321,19 @@ def serialize_movie(row: pd.Series) -> Dict[str, Any]:
 
 
 def get_recommendations(query: str, limit: int = MAX_RESULTS, sort_by: str = "none") -> Dict[str, Any]:
-    movie_index = resolve_movie_index(query)
-    if movie_index is None:
+    movie_item = resolve_movie(query)
+    if movie_item is None:
         return {"error": "Movie not found"}
 
     limit = max(1, min(int(limit), MAX_RESULTS))
-    similarity_scores = linear_kernel(tfidf_matrix[movie_index : movie_index + 1], tfidf_matrix).flatten()
-    ranked_indices = similarity_scores.argsort()[::-1]
+    movie_id = movie_item["movieId"]
+    rec_ids = recommendations_map.get(movie_id, [])
 
-    seed_row = movies.iloc[movie_index]
-    seen_imdb_ids = {seed_row["imdbId"]}
-    seen_titles = {seed_row["normalized_title"]}
     recommendations = []
-
-    for candidate_index in ranked_indices:
-        if int(candidate_index) == movie_index:
-            continue
-
-        row = movies.iloc[int(candidate_index)]
-        imdb_id = row["imdbId"]
-        normalized_title = row["normalized_title"]
-
-        if not imdb_id or imdb_id in seen_imdb_ids or normalized_title in seen_titles:
-            continue
-
-        recommendations.append(
-            {
-                **serialize_movie(row),
-                "similarity": float(similarity_scores[int(candidate_index)]),
-            }
-        )
-        seen_imdb_ids.add(imdb_id)
-        seen_titles.add(normalized_title)
-
-        if len(recommendations) >= limit * 3:
-            break
+    for rec_id in rec_ids:
+        cand_movie = movies_by_id.get(rec_id)
+        if cand_movie:
+            recommendations.append(serialize_movie(cand_movie))
 
     if sort_by == "rating":
         recommendations.sort(key=lambda item: item["rating"], reverse=True)
@@ -378,8 +341,6 @@ def get_recommendations(query: str, limit: int = MAX_RESULTS, sort_by: str = "no
         recommendations.sort(key=lambda item: item["title"])
     elif sort_by == "year":
         recommendations.sort(key=lambda item: item["year"], reverse=True)
-    else:
-        recommendations.sort(key=lambda item: item["similarity"], reverse=True)
 
     trimmed = []
     seen_output_titles = set()
@@ -387,7 +348,6 @@ def get_recommendations(query: str, limit: int = MAX_RESULTS, sort_by: str = "no
         if item["title"] in seen_output_titles:
             continue
         seen_output_titles.add(item["title"])
-        item.pop("similarity", None)
         trimmed.append(item)
         if len(trimmed) >= limit:
             break
@@ -396,11 +356,12 @@ def get_recommendations(query: str, limit: int = MAX_RESULTS, sort_by: str = "no
 
 
 def get_trending_movies(limit: int = 10) -> Dict[str, Any]:
-    recent_movies = movies.sort_values(["year", "movieId"], ascending=[False, True])
+    # Sort movies by year descending, movieId ascending
+    sorted_movies = sorted(movies_list, key=lambda x: (-x["year"], x["movieId"]))
     trending = []
     seen_titles = set()
 
-    for _, row in recent_movies.iterrows():
+    for row in sorted_movies:
         if row["normalized_title"] in seen_titles:
             continue
 
@@ -422,6 +383,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+FRONTEND_DIST_DIR = PROJECT_ROOT / "frontend-vite" / "dist"
+FRONTEND_ASSETS_DIR = FRONTEND_DIST_DIR / "assets"
 
 if FRONTEND_ASSETS_DIR.exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_ASSETS_DIR), name="assets")
@@ -448,7 +412,8 @@ def trending() -> Dict[str, Any]:
 @app.get("/api/genres")
 def get_genres() -> Dict[str, Any]:
     genre_set = set()
-    for item in movies["genres"].dropna():
+    for m in movies_list:
+        item = m.get("genres")
         if item:
             for g in item.split("|"):
                 g = g.strip()
@@ -463,15 +428,15 @@ def search_movies(q: str, limit: int = 10) -> Dict[str, Any]:
     if not q_norm:
         return {"results": []}
 
-    matches = movies[movies["normalized_title"].str.contains(re.escape(q_norm), regex=True)]
-    matches = matches.sort_values(["year"], ascending=False).head(limit)
+    matches = [m for m in movies_list if q_norm in m["normalized_title"]]
+    matches.sort(key=lambda x: x["year"], reverse=True)
 
     results = []
-    for _, row in matches.iterrows():
+    for row in matches[:limit]:
         results.append({
             "movieId": int(row["movieId"]),
             "title": row["title"],
-            "year": int(row["year"]) if pd.notna(row["year"]) else 0,
+            "year": int(row["year"]) if row.get("year") is not None else 0,
             "genres": row["genres"],
             "imdbId": row["imdbId"],
         })
@@ -487,16 +452,17 @@ def discover_movies(
     limit: int = 20,
     page: int = 1
 ) -> Dict[str, Any]:
-    filtered = movies.copy()
+    filtered = list(movies_list)
 
     if genre:
-        filtered = filtered[filtered["genres"].str.contains(re.escape(genre), case=False, na=False)]
+        genre_lower = genre.lower()
+        filtered = [m for m in filtered if genre_lower in m["genres"].lower()]
 
     if year_start:
-        filtered = filtered[filtered["year"] >= year_start]
+        filtered = [m for m in filtered if m["year"] >= year_start]
 
     if year_end:
-        filtered = filtered[filtered["year"] <= year_end]
+        filtered = [m for m in filtered if m["year"] <= year_end]
 
     if min_rating is not None:
         def get_rating(imdb_id):
@@ -505,17 +471,16 @@ def discover_movies(
                 r = normalize_rating(cached.get("rating"))
                 return r if r is not None else 0.0
             return 0.0
-        filtered["cached_rating"] = filtered["imdbId"].apply(get_rating)
-        filtered = filtered[filtered["cached_rating"] >= min_rating]
+        filtered = [m for m in filtered if get_rating(m["imdbId"]) >= min_rating]
 
     total_results = len(filtered)
     start_idx = (page - 1) * limit
     end_idx = start_idx + limit
 
-    subset = filtered.iloc[start_idx:end_idx]
+    subset = filtered[start_idx:end_idx]
 
     results = []
-    for _, row in subset.iterrows():
+    for row in subset:
         results.append(serialize_movie(row))
 
     return {
@@ -532,9 +497,9 @@ def get_movie(imdb_id: str) -> Dict[str, Any]:
     if not imdb_id:
         return {"error": "Invalid IMDb ID"}
 
-    match = movies[movies["imdbId"] == imdb_id]
-    if match.empty:
+    row = movies_by_imdb.get(imdb_id)
+    if not row:
         return {"error": "Movie not found in dataset"}
 
-    row = match.iloc[0]
     return serialize_movie(row)
+
