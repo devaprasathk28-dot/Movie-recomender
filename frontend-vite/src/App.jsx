@@ -18,8 +18,8 @@ import About from "./pages/About";
 axios.defaults.baseURL =
   window.location.hostname === "localhost" ||
   window.location.hostname === "127.0.0.1"
-    ? "http://127.0.0.1:8000"
-    : "";
+    ? "http://127.0.0.1:8000/api"
+    : "/api";
 
 export default function App() {
   return (

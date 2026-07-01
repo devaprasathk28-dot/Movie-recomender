@@ -435,17 +435,17 @@ def serve_react() -> FileResponse:
     return FileResponse(PROJECT_ROOT / "README.md")
 
 
-@app.get("/recommend/{movie}")
+@app.get("/api/recommend/{movie}")
 def recommend(movie: str, limit: int = MAX_RESULTS, sort_by: str = "none") -> Dict[str, Any]:
     return get_recommendations(movie, limit=limit, sort_by=sort_by)
 
 
-@app.get("/trending")
+@app.get("/api/trending")
 def trending() -> Dict[str, Any]:
     return get_trending_movies()
 
 
-@app.get("/genres")
+@app.get("/api/genres")
 def get_genres() -> Dict[str, Any]:
     genre_set = set()
     for item in movies["genres"].dropna():
@@ -457,7 +457,7 @@ def get_genres() -> Dict[str, Any]:
     return {"genres": sorted(list(genre_set))}
 
 
-@app.get("/search")
+@app.get("/api/search")
 def search_movies(q: str, limit: int = 10) -> Dict[str, Any]:
     q_norm = normalize_title(q)
     if not q_norm:
@@ -478,7 +478,7 @@ def search_movies(q: str, limit: int = 10) -> Dict[str, Any]:
     return {"results": results}
 
 
-@app.get("/discover")
+@app.get("/api/discover")
 def discover_movies(
     genre: Optional[str] = None,
     year_start: Optional[int] = None,
@@ -526,7 +526,7 @@ def discover_movies(
     }
 
 
-@app.get("/movie/{imdb_id}")
+@app.get("/api/movie/{imdb_id}")
 def get_movie(imdb_id: str) -> Dict[str, Any]:
     imdb_id = format_imdb_id(imdb_id)
     if not imdb_id:

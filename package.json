@@ -1,0 +1,7 @@
+{
+  "name": "cineverse-recommender",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "npm install --prefix frontend-vite && npm run build --prefix frontend-vite"
+  }
+}
