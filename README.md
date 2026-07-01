@@ -33,32 +33,126 @@ Built with a **FastAPI** backend and a **React + Vite** frontend, Cineverse calc
 
 ---
 
-## 🤖 AI & Machine Learning Pipeline
+## 🤖 AI & Machine Learning Architecture & Flow
 
-Cineverse utilizes a **Content-Based Vector Space Model** to match user tastes with relevant films:
+Cineverse utilizes a **Content-Based Vector Space Model (VSM)** to analyze, represent, and recommend movies. To ensure compliance with Vercel's serverless size limits, the execution flow is divided into an **Offline Build-Time Precomputation Phase** and a **Runtime Serverless Inference Phase**.
 
 ```
-[Movie Metadata] ➔ [Feature Tags (Title, Genre, Year)] ➔ [TF-IDF Vectorizer] ➔ [Cosine Similarity] ➔ [Top Recommendations]
++---------------------------------------------------------------------------------+
+|                       OFFLINE BUILD-TIME PRECOMPUTATION                         |
+|                                                                                 |
+|  [Raw CSVs] ➔ [Tag Preparation] ➔ [TF-IDF Vectorization] ➔ [Similarity Matrix]  |
+|                                         │                                       |
+|                                         ▼                                       |
+|                         [movies.json] + [recommendations.json]                  |
++---------------------------------------------------------------------------------+
+                                          │
+                                          ▼
++---------------------------------------------------------------------------------+
+|                          RUNTIME SERVERLESS INFERENCE                           |
+|                                                                                 |
+|  [Search Query] ➔ [O(1) JSON Lookup] ➔ [Dynamic Sorting/Filtering] ➔ [Response]  |
++---------------------------------------------------------------------------------+
 ```
 
-### 1. Feature Representation (TF-IDF)
-For each movie in the corpus, we build a textual representation string by extracting and repeating metadata fields to prioritize genres over release years:
-$$\text{Tags} = \text{Normalized Title} + \text{" "} + \text{Genres} + \text{" "} + \text{Genres} + \text{" "} + \text{Release Year}$$
+---
 
-We apply a **Term Frequency-Inverse Document Frequency (TF-IDF)** vectorizer with $n$-gram ranges of $(1, 2)$ to convert these unstructured strings into high-dimensional sparse numerical vectors. This mathematical transformation assigns higher weights to rare genres and distinct title words, discounting common generic terms.
+### 1. Document Preprocessing & Feature Engineering
+Before mathematical modeling, raw metadata from `movies.csv` and `links.csv` is parsed and sanitized:
+1.  **Deduplication & Merge**: Links and movies are joined via `movieId`. We drop rows with missing IMDb identifiers and drop duplicate movies to enforce unique records.
+2.  **Title Sanitization**: Movie titles are normalized using regular expressions. Parenthetical release years (e.g., `(1995)`) and special characters are stripped out, collapsing all characters to lowercase.
+3.  **Genre Weight Multiplier**: To ensure recommendations are heavily influenced by genre alignment rather than just title terms or release years, the genres text (with pipes replaced by spaces) is **duplicated twice** in the tags string.
+4.  **Metadata Tag Assembly**: For each movie, a raw feature tag string is constructed:
+    $$\text{Tag String}_d = \text{NormalizedTitle}_d + \text{" "} + \text{Genres}_d + \text{" "} + \text{Genres}_d + \text{" "} + \text{ReleaseYear}_d$$
 
-### 2. Cosine Similarity Measurement
-The similarity between two movie vectors $\vec{u}$ and $\vec{v}$ is evaluated using the cosine of the angle between them:
-$$\text{Similarity}(\vec{u}, \vec{v}) = \cos(\theta) = \frac{\vec{u} \cdot \vec{v}}{\|\vec{u}\| \|\vec{v}\|}$$
+*Example for "Toy Story (1995)"*:
+*   **Normalized Title**: `toy story`
+*   **Genres**: `Adventure Animation Children Comedy Fantasy`
+*   **Output Tags**: `"toy story adventure animation children comedy fantasy adventure animation children comedy fantasy 1995"`
 
-We compute a linear kernel between the target movie's vector and all other vectors in the database, sorting them descending by similarity score.
+---
 
-### 3. Serverless Size Optimization (Precomputation)
-Vercel enforces a strict **250 MB** size limit on Python Serverless Function archives. Standard scientific computing libraries like `numpy`, `pandas`, `scipy`, and `scikit-learn` combine to exceed **400 MB**, failing standard deployments.
+### 2. Mathematical Modeling (TF-IDF Vectorization)
+The unstructured text tags are converted into numerical feature vectors in a sparse vector space using the **Term Frequency-Inverse Document Frequency (TF-IDF)** framework. 
 
-To solve this, Cineverse uses a hybrid architecture:
-*   **Build-time Precomputation** ([precompute.py](file:///c:/Users/devap/Documents/Movie%20recommendation/backend/precompute.py)): We run the TF-IDF and Cosine Similarity computations locally once. This compiles all 27,278 movies into a structured [movies.json](file:///c:/Users/devap/Documents/Movie%20recommendation/backend/movies.json) metadata file and precalculates the top 30 recommendations for every movie into [recommendations.json](file:///c:/Users/devap/Documents/Movie%20recommendation/backend/recommendations.json).
-*   **Production Serverless Runtime**: The backend imports zero scientific libraries. It reads the precompiled JSON files on startup and executes search, filtering, and recommendation retrievals via highly optimized, O(1) Python dictionary lookups. This slashes the backend size from **513 MB to under 20 MB** and speeds up request responses to sub-milliseconds.
+```mermaid
+flowchart TD
+    A[Processed Tag Strings] --> B[Tokenization & Stop Word Filter]
+    B --> C[Bi-gram Vocabulary Extraction]
+    C --> D[Compute Term Frequency TF]
+    C --> E[Compute Inverse Document Frequency IDF]
+    D & E --> F[Calculate TF-IDF Weights]
+    F --> G[L2 Vector Normalization]
+    G --> H[Sparse CSR Feature Matrix]
+```
+
+#### Step A: Tokenization & Vocabulary Construction
+*   We use a `TfidfVectorizer` that ignores standard English stop words (like "the", "and", "is") which contain no movie search value.
+*   **N-gram Range**: Set to $(1, 2)$, meaning we extract both unigrams (single words like `"story"`) and bigrams (consecutive word pairs like `"toy story"`). This captures phrases and compound genres.
+*   The vocabulary represents all unique tokens extracted from the corpus. Let $V$ be the size of the vocabulary.
+
+#### Step B: Term Frequency (TF)
+For a token $t$ in a movie's tag document $d$:
+$$\text{TF}(t, d) = \frac{\text{Count}(t \text{ in } d)}{\text{Total tokens in } d}$$
+
+#### Step C: Inverse Document Frequency (IDF)
+To penalize extremely common words that appear in many documents (e.g., "comedy" or "action") and highlight distinctive keywords, the inverse document frequency is computed as:
+$$\text{IDF}(t) = \log \left( \frac{1 + N}{1 + \text{DF}(t)} \right) + 1$$
+*   Where $N$ is the total number of movies in the corpus ($27,278$).
+*   $\text{DF}(t)$ is the document frequency: the number of movies containing token $t$.
+*   The constants ($1$) prevent division-by-zero errors for out-of-vocabulary terms and ensure non-negative weights.
+
+#### Step D: TF-IDF Weight Calculation
+The raw weight for token $t$ in movie $d$ is:
+$$\text{Raw Weight}(t, d) = \text{TF}(t, d) \times \text{IDF}(t)$$
+
+#### Step E: Vector Normalization
+To prevent longer titles or multiple genres from skewing the similarity metrics, we apply **$L_2$ (Euclidean) Normalization** to scale each movie's vector $\vec{v}_d$ to unit length:
+$$\vec{v}_d = \frac{\vec{v}_d}{\|\vec{v}_d\|_2} = \frac{\vec{v}_d}{\sqrt{\sum_{i=1}^{V} \text{Raw Weight}(t_i, d)^2}}$$
+
+The resulting vector space is stored as a compressed sparse row (CSR) matrix of dimensions $27,278 \times V$.
+
+---
+
+### 3. Cosine Similarity Measurement
+The recommendation engine measures the similarity between two movie vectors $\vec{u}$ and $\vec{v}$ by computing the cosine of the angle between them. Since our vectors are $L_2$ normalized, this equals their dot product:
+$$\text{Similarity}(\vec{u}, \vec{v}) = \cos(\theta) = \frac{\vec{u} \cdot \vec{v}}{\|\vec{u}\|_2 \|\vec{v}\|_2} = \sum_{i=1}^{V} u_i \cdot v_i$$
+
+For any target movie, we compute a linear kernel between its vector and the entire matrix to generate a similarity score array of size $27,278$.
+
+To eliminate duplicates during this process:
+1.  Candidates are sorted in descending order of similarity.
+2.  Self-similarity (score of 1.0 against itself) is filtered.
+3.  We track candidate `imdbId` and `normalized_title` to skip duplicates (such as remakes or duplicate listings) and retrieve the top 30 most similar, distinct movies.
+
+---
+
+### 4. Build-Time Precomputation vs. Serverless Runtime Flow
+To satisfy Vercel's **250 MB size limit** for serverless function ZIPs, the dependencies `numpy`, `pandas`, `scipy`, and `scikit-learn` (which total over 400 MB) are used exclusively **locally during the build-time precomputation phase** and are omitted entirely from production serverless execution.
+
+#### Offline Precomputation Flow (Local Dev)
+1.  Run [precompute.py](file:///c:/Users/devap/Documents/Movie%20recommendation/backend/precompute.py).
+2.  Load local datasets `movies.csv` and `links.csv`.
+3.  Run TF-IDF and calculate the pairwise cosine similarity for all movies.
+4.  Write metadata to [movies.json](file:///c:/Users/devap/Documents/Movie%20recommendation/backend/movies.json).
+5.  Write the similarity relationships map (`movieId` ➔ list of 30 recommended `movieIds`) to [recommendations.json](file:///c:/Users/devap/Documents/Movie%20recommendation/backend/recommendations.json).
+6.  Commit the JSON files to Git.
+
+#### Online Inference Flow (Vercel Serverless Function)
+```mermaid
+sequenceDiagram
+    autonumber
+    Client SPA ->> FastAPI: GET /api/recommend/{query}
+    FastAPI ->> FastAPI: Normalize and resolve query to movieId
+    Note over FastAPI: 1. Exact title match<br/>2. Prefix starts-with match<br/>3. Substring contains match
+    FastAPI ->> recommendations.json: Lookup recommendation IDs (O(1) time)
+    FastAPI ->> movies.json: Lookup movie details for each ID
+    FastAPI ->> OMDb Cache: Fetch/Update dynamic posters, plots, and ratings
+    FastAPI ->> FastAPI: Apply client-requested sorting (alphabet, rating, release year)
+    FastAPI ->> Client SPA: Return JSON recommendations response
+```
+
+This decoupled architecture achieves **sub-millisecond lookups** in production, requires **less than 20 MB** of dependencies, and runs serverlessly on Vercel without package size conflicts.
 
 ---
 
