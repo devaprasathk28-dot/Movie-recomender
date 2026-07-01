@@ -1,16 +1,60 @@
-# Ignore dataset files
-data/
-data_sets/*.csv
-data_sets/*.zip
-# Ignore Python cache
-__pycache__/
-*.pyc
-
-# Ignore node modules
+# Dependencies and Package Managers
 node_modules/
+jspm_packages/
+.pnp/
+.pnp.js
 
-# Ignore frontend build
+# Production Builds and Distributions
 dist/
+dist-ssr/
+build/
+out/
+.vercel/
 
-# Ignore env files
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
 .env
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Python Compilation and Caches
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.eggs/
+
+# IDEs and Text Editors
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Datasets & Temp Files
+data_sets/
+data/*.zip
+data/*.tar.gz
+data/*.rar

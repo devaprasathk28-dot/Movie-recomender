@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "rewrites": [
+    { "source": "/recommend/:path*", "destination": "/api/index.py" },
+    { "source": "/trending", "destination": "/api/index.py" },
+    { "source": "/genres", "destination": "/api/index.py" },
+    { "source": "/search", "destination": "/api/index.py" },
+    { "source": "/discover", "destination": "/api/index.py" },
+    { "source": "/movie/:path*", "destination": "/api/index.py" },
+    { "source": "/(.*)", "destination": "/frontend-vite/dist/$1" }
+  ]
+}

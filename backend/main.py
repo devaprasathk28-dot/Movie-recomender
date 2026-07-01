@@ -102,6 +102,12 @@ def load_cache() -> Dict[str, Dict[str, Any]]:
                 "poster": value.get("poster") or POSTER_PLACEHOLDER,
                 "rating": value.get("rating"),
                 "overview": value.get("overview") or "",
+                "director": value.get("director") or "",
+                "actors": value.get("actors") or "",
+                "runtime": value.get("runtime") or "",
+                "genre": value.get("genre") or "",
+                "released": value.get("released") or "",
+                "youtube_trailer_id": value.get("youtube_trailer_id"),
             }
         elif isinstance(value, list):
             poster = value[0] if len(value) > 0 else POSTER_PLACEHOLDER
@@ -111,6 +117,12 @@ def load_cache() -> Dict[str, Dict[str, Any]]:
                 "poster": poster or POSTER_PLACEHOLDER,
                 "rating": rating,
                 "overview": overview or "",
+                "director": "",
+                "actors": "",
+                "runtime": "",
+                "genre": "",
+                "released": "",
+                "youtube_trailer_id": None,
             }
 
     return normalized_cache
@@ -135,11 +147,37 @@ def normalize_rating(value: Any) -> Optional[float]:
         return None
 
 
+def fetch_youtube_trailer(title: str) -> Optional[str]:
+    query = f"{title} official trailer"
+    url = f"https://www.youtube.com/results?search_query={requests.utils.quote(query)}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    try:
+        response = session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        html = response.text
+        video_ids = re.findall(r'"videoId":"([^"]+)"', html)
+        if video_ids:
+            return video_ids[0]
+        match = re.search(r'/watch\?v=([a-zA-Z0-9_-]{11})', html)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+    return None
+
+
 def fallback_movie_details() -> Dict[str, Any]:
     return {
         "poster": POSTER_PLACEHOLDER,
         "rating": None,
         "overview": "",
+        "director": "",
+        "actors": "",
+        "runtime": "",
+        "genre": "",
+        "released": "",
+        "youtube_trailer_id": None,
     }
 
 
@@ -153,10 +191,25 @@ def fetch_movie_details(imdb_id: Optional[str]) -> Dict[str, Any]:
 
     cached = cache.get(imdb_id)
     if cached:
+        if "youtube_trailer_id" not in cached or cached.get("youtube_trailer_id") is None:
+            try:
+                match = movies[movies["imdbId"] == imdb_id]
+                if not match.empty:
+                    title = match.iloc[0]["title"]
+                    cached["youtube_trailer_id"] = fetch_youtube_trailer(title)
+                    save_cache()
+            except Exception:
+                pass
         return {
             "poster": cached.get("poster") or POSTER_PLACEHOLDER,
             "rating": normalize_rating(cached.get("rating")),
             "overview": cached.get("overview") or "",
+            "director": cached.get("director") or "",
+            "actors": cached.get("actors") or "",
+            "runtime": cached.get("runtime") or "",
+            "genre": cached.get("genre") or "",
+            "released": cached.get("released") or "",
+            "youtube_trailer_id": cached.get("youtube_trailer_id"),
         }
 
     details = fallback_movie_details()
@@ -176,15 +229,25 @@ def fetch_movie_details(imdb_id: Optional[str]) -> Dict[str, Any]:
                     "poster": poster if poster and poster != "N/A" else POSTER_PLACEHOLDER,
                     "rating": normalize_rating(data.get("imdbRating")),
                     "overview": data.get("Plot") if data.get("Plot") not in (None, "N/A") else "",
+                    "director": data.get("Director") if data.get("Director") not in (None, "N/A") else "",
+                    "actors": data.get("Actors") if data.get("Actors") not in (None, "N/A") else "",
+                    "runtime": data.get("Runtime") if data.get("Runtime") not in (None, "N/A") else "",
+                    "genre": data.get("Genre") if data.get("Genre") not in (None, "N/A") else "",
+                    "released": data.get("Released") if data.get("Released") not in (None, "N/A") else "",
+                    "youtube_trailer_id": None,
                 }
         except (requests.RequestException, ValueError, json.JSONDecodeError):
             pass
 
-    cache[imdb_id] = {
-        "poster": details["poster"],
-        "rating": details["rating"],
-        "overview": details["overview"],
-    }
+    try:
+        match = movies[movies["imdbId"] == imdb_id]
+        if not match.empty:
+            title = match.iloc[0]["title"]
+            details["youtube_trailer_id"] = fetch_youtube_trailer(title)
+    except Exception:
+        pass
+
+    cache[imdb_id] = details
     save_cache()
     return details
 
@@ -255,13 +318,20 @@ def serialize_movie(row: pd.Series) -> Dict[str, Any]:
     rating = details["rating"]
 
     return {
+        "movieId": int(row["movieId"]),
         "title": row["title"],
         "poster": details["poster"],
         "backdrop": details["poster"],
         "rating": rating if rating is not None else -1,
         "year": int(row["year"]) if pd.notna(row["year"]) else 0,
         "overview": details["overview"],
+        "director": details.get("director") or "",
+        "actors": details.get("actors") or "",
+        "runtime": details.get("runtime") or "",
+        "genre": details.get("genre") or row["genres"],
+        "released": details.get("released") or "",
         "imdbId": row["imdbId"],
+        "youtube_trailer_id": details.get("youtube_trailer_id"),
     }
 
 
@@ -373,3 +443,98 @@ def recommend(movie: str, limit: int = MAX_RESULTS, sort_by: str = "none") -> Di
 @app.get("/trending")
 def trending() -> Dict[str, Any]:
     return get_trending_movies()
+
+
+@app.get("/genres")
+def get_genres() -> Dict[str, Any]:
+    genre_set = set()
+    for item in movies["genres"].dropna():
+        if item:
+            for g in item.split("|"):
+                g = g.strip()
+                if g and g != "(no genres listed)":
+                    genre_set.add(g)
+    return {"genres": sorted(list(genre_set))}
+
+
+@app.get("/search")
+def search_movies(q: str, limit: int = 10) -> Dict[str, Any]:
+    q_norm = normalize_title(q)
+    if not q_norm:
+        return {"results": []}
+
+    matches = movies[movies["normalized_title"].str.contains(re.escape(q_norm), regex=True)]
+    matches = matches.sort_values(["year"], ascending=False).head(limit)
+
+    results = []
+    for _, row in matches.iterrows():
+        results.append({
+            "movieId": int(row["movieId"]),
+            "title": row["title"],
+            "year": int(row["year"]) if pd.notna(row["year"]) else 0,
+            "genres": row["genres"],
+            "imdbId": row["imdbId"],
+        })
+    return {"results": results}
+
+
+@app.get("/discover")
+def discover_movies(
+    genre: Optional[str] = None,
+    year_start: Optional[int] = None,
+    year_end: Optional[int] = None,
+    min_rating: Optional[float] = None,
+    limit: int = 20,
+    page: int = 1
+) -> Dict[str, Any]:
+    filtered = movies.copy()
+
+    if genre:
+        filtered = filtered[filtered["genres"].str.contains(re.escape(genre), case=False, na=False)]
+
+    if year_start:
+        filtered = filtered[filtered["year"] >= year_start]
+
+    if year_end:
+        filtered = filtered[filtered["year"] <= year_end]
+
+    if min_rating is not None:
+        def get_rating(imdb_id):
+            cached = cache.get(imdb_id)
+            if cached:
+                r = normalize_rating(cached.get("rating"))
+                return r if r is not None else 0.0
+            return 0.0
+        filtered["cached_rating"] = filtered["imdbId"].apply(get_rating)
+        filtered = filtered[filtered["cached_rating"] >= min_rating]
+
+    total_results = len(filtered)
+    start_idx = (page - 1) * limit
+    end_idx = start_idx + limit
+
+    subset = filtered.iloc[start_idx:end_idx]
+
+    results = []
+    for _, row in subset.iterrows():
+        results.append(serialize_movie(row))
+
+    return {
+        "movies": results,
+        "total": total_results,
+        "page": page,
+        "pages": (total_results + limit - 1) // limit
+    }
+
+
+@app.get("/movie/{imdb_id}")
+def get_movie(imdb_id: str) -> Dict[str, Any]:
+    imdb_id = format_imdb_id(imdb_id)
+    if not imdb_id:
+        return {"error": "Invalid IMDb ID"}
+
+    match = movies[movies["imdbId"] == imdb_id]
+    if match.empty:
+        return {"error": "Movie not found in dataset"}
+
+    row = match.iloc[0]
+    return serialize_movie(row)
